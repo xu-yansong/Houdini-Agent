@@ -955,6 +955,7 @@ class AIClient(AIClientContextMixin, AIClientProvidersMixin, AIClientStreamingMi
             'glm': self._read_api_key('glm'),
             'duojie': self._read_api_key('duojie'),
             'openrouter': self._read_api_key('openrouter'),
+            'codemaker': self._read_api_key('codemaker'),
             'custom': self._read_api_key('custom'),
         }
         self._ssl_context = self._create_ssl_context()

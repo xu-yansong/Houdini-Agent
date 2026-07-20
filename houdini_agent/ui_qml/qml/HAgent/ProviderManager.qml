@@ -136,14 +136,18 @@ Item {
                     color: bma.containsMouse ? Theme.surface : "transparent"
                     RowLayout {
                         anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; spacing: 9
-                        DotChip { on: true }
+                        DotChip { on: modelData.configured }
                         Text { Layout.fillWidth: true; text: modelData.name; color: Theme.text
                                font.family: Theme.fontBody; font.pixelSize: Theme.fSm; elide: Text.ElideRight }
                         Text { visible: modelData.active; text: pm.loc("当前"); color: Theme.accent
                                font.family: Theme.fontMono; font.pixelSize: Theme.fMicro; font.letterSpacing: Theme.trackLabel }
                         Pill { visible: !modelData.active; label: pm.loc("使用")
                                onClicked: if (controller) controller.selectProviderModel(modelData.key, "") }
-                        Pill { label: "API Key"; onClicked: if (controller) controller.openProviderApiKey(modelData.key) }
+                        Pill { visible: modelData.login === true
+                               label: modelData.configured ? pm.loc("重新登录") : pm.loc("登录")
+                               onClicked: if (controller) controller.loginCodemaker() }
+                        Pill { visible: !(modelData.login === true); label: "API Key"
+                               onClicked: if (controller) controller.openProviderApiKey(modelData.key) }
                     }
                     MouseArea { id: bma; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                 }

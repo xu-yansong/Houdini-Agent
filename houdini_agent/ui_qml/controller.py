@@ -50,11 +50,12 @@ MODEL_MAP = {
     "openai": ["gpt-5.2", "gpt-5.3-codex"],
     "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
     "glm": ["glm-4.7"],
+    "codemaker": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "glm-5.1"],
     "custom": [],
 }
 PROVIDER_LABELS = {
     "duojie": "Duojie", "openrouter": "OpenRouter", "openai": "OpenAI",
-    "deepseek": "DeepSeek", "glm": "GLM", "custom": "Custom",
+    "deepseek": "DeepSeek", "glm": "GLM", "codemaker": "CodeMaker", "custom": "Custom",
 }
 CONTEXT_LIMITS = {
     "claude-opus-4-6-max": 200000, "claude-opus-4-6-gemini": 200000,
@@ -66,6 +67,8 @@ CONTEXT_LIMITS = {
     "x-ai/grok-4.1-fast": 2000000, "gpt-5.2": 128000, "gpt-5.3-codex": 200000,
     "deepseek-v4-flash": 1048576, "deepseek-v4-pro": 1048576, "deepseek-chat": 1048576,
     "deepseek-reasoner": 1048576, "glm-4.7": 200000,
+    "claude-opus-4-6": 1000000,
+    "claude-opus-4-7": 1000000, "claude-opus-4-8": 1000000,
 }
 VISION_MODELS = {
     "claude-opus-4-6-max", "claude-opus-4-6-gemini", "claude-sonnet-4-6",
@@ -74,6 +77,7 @@ VISION_MODELS = {
     "anthropic/claude-haiku-4.5", "openai/gpt-5.2",
     "google/gemini-3-flash-preview", "x-ai/grok-4.1-fast",
     "gpt-5.2", "gpt-5.3-codex",
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
 }
 # tools safe to run off the Qt main thread (no hou.* access)
 BG_SAFE = {"web_search", "fetch_webpage", "search_local_doc", "get_houdini_node_doc",
@@ -263,6 +267,13 @@ UI_EN = {
     "名称": "Name", "API 格式": "API format", "模型列表": "Models",
     "添加模型": "Add model", "上下文窗口": "Context window", "图片": "Vision",
     "使用": "Use", "当前": "Active", "保存": "Save", "模型名": "Model name",
+    "登录": "Sign in", "重新登录": "Re-login",
+    "CodeMaker 登录进行中，请稍候…": "CodeMaker sign-in in progress…",
+    "正在准备 CodeMaker，会自动检测/安装 CLI 并弹出登录窗口…":
+        "Preparing CodeMaker: detecting/installing the CLI and opening the login window…",
+    "CodeMaker 登录成功。": "CodeMaker signed in.",
+    "CodeMaker 登录失败：": "CodeMaker sign-in failed: ",
+    "未知错误": "Unknown error",
     "还没有自定义供应商": "No custom providers yet",
     "请填写名称": "Please enter a name", "请填写有效的 Base URL": "Enter a valid Base URL",
     "请至少添加一个模型": "Add at least one model", "无效数据": "Invalid data", "已保存": "Saved",
@@ -534,6 +545,7 @@ class Controller(QObject):
     _sigMeshyAccount = Signal(str)   # json {connected, balance, error} -> main thread
     _sigDeliverBg = Signal()         # a backgrounded Meshy task finished -> feed agent
     _sigShowBgGallery = Signal(str)  # token -> pop an interactive gallery after a bg concept run
+    _sigCodemakerLogin = Signal(bool, str, str)  # (success, message, api_key) worker -> main
     libraryOpenChanged = Signal()
     libraryChanged = Signal()        # items list changed
     libraryLoadingChanged = Signal()
@@ -694,6 +706,7 @@ class Controller(QObject):
         self._sigInfo.connect(self._info)
         self._sigCtxRefresh.connect(self.refreshContext)
         self._sigUpdateState.connect(self._on_update_state)
+        self._sigCodemakerLogin.connect(self._on_codemaker_login_done)
 
         # coalesce UI flushes to ~25fps (avoids O(N^2) re-render on long runs)
         self._flush_timer = QTimer(self)
@@ -1032,11 +1045,17 @@ class Controller(QObject):
     @Slot(result="QVariantList")
     def builtinProviderItems(self):
         out = []
+        client = getattr(self._session, "client", None) if self._session else None
         for k in MODEL_MAP.keys():
             if k == "custom":
                 continue
+            try:
+                configured = bool(client.has_api_key(k)) if client else False
+            except Exception:
+                configured = False
             out.append({"key": k, "name": PROVIDER_LABELS.get(k, k),
-                        "active": self._provider == k, "models": list(MODEL_MAP.get(k, []))})
+                        "active": self._provider == k, "models": list(MODEL_MAP.get(k, [])),
+                        "login": k == "codemaker", "configured": configured})
         return out
 
     @Slot(str, result="QVariantMap")
@@ -1107,6 +1126,51 @@ class Controller(QObject):
             self.openApiKeyDialog.emit(provider or self._provider)
         except Exception as e:
             print("[controller] open provider api key failed:", e)
+
+    @Slot()
+    def loginCodemaker(self):
+        """CodeMaker 一键登录：后台线程检测/安装 CLI 并启动浏览器 OAuth。"""
+        if getattr(self, "_codemaker_logging_in", False):
+            self.toast.emit(self.tr("CodeMaker 登录进行中，请稍候…"))
+            return
+        self._codemaker_logging_in = True
+        self.toast.emit(self.tr("正在准备 CodeMaker，会自动检测/安装 CLI 并弹出登录窗口…"))
+
+        def _worker():
+            try:
+                from houdini_agent.utils.codemaker_auth import ensure_codemaker_ready
+
+                def _cb(msg):
+                    try:
+                        self.toast.emit(str(msg))
+                    except Exception:
+                        pass
+
+                ok, msg, key = ensure_codemaker_ready(progress_cb=_cb)
+                self._sigCodemakerLogin.emit(bool(ok), msg or "", key or "")
+            except Exception as e:
+                self._sigCodemakerLogin.emit(False, "内部错误: %s" % e, "")
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_codemaker_login_done(self, success, message, api_key):
+        """CodeMaker 登录结束回调（主线程）。"""
+        self._codemaker_logging_in = False
+        if success and api_key:
+            client = getattr(self._session, "client", None) if self._session else None
+            if client is not None:
+                try:
+                    client._api_keys["codemaker"] = api_key
+                except Exception:
+                    pass
+            self.toast.emit(self.tr("CodeMaker 登录成功。"))
+            try:
+                self.customProvidersChanged.emit()
+            except Exception:
+                pass
+        else:
+            self.toast.emit(self.tr("CodeMaker 登录失败：") + (message or self.tr("未知错误")))
 
     @Slot(bool)
     def setThink(self, on):

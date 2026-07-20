@@ -32,6 +32,7 @@ class AIClientProvidersMixin:
     DUOJIE_API_URL = "https://api.duojie.games/v1/chat/completions"  # 拼好饭中转站（OpenAI 协议）
     DUOJIE_ANTHROPIC_API_URL = "https://api.duojie.games/v1/messages"  # 拼好饭中转站（Anthropic 协议）
     OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"  # OpenRouter（OpenAI 兼容）
+    CODEMAKER_API_URL = "https://api-code-maker.nie.netease.com/openai/v1/chat/completions"  # 网易 CodeMaker（OpenAI 兼容）
 
     # 使用 Anthropic 协议的 Duojie 模型（GLM 系等）
     _DUOJIE_ANTHROPIC_MODELS = frozenset({'glm-4.7', 'glm-5', 'glm-5-turbo', 'glm-5.1'})
@@ -59,12 +60,24 @@ class AIClientProvidersMixin:
     def _read_api_key(self, provider: str) -> Optional[str]:
         provider = (provider or 'openai').lower()
 
+        # CodeMaker：优先从 CLI 写入的 auth.json 读取
+        if provider == 'codemaker':
+            try:
+                from .codemaker_auth import read_codemaker_api_key
+                _key = read_codemaker_api_key()
+                if _key:
+                    return _key
+            except Exception as _e:
+                print(f"[AI Client] CodeMaker auth.json 读取失败: {_e}")
+            # 回退到环境变量 / 持久化配置
+
         env_map = {
             'openai': ['OPENAI_API_KEY', 'DCC_AI_OPENAI_API_KEY'],
             'deepseek': ['DEEPSEEK_API_KEY', 'DCC_AI_DEEPSEEK_API_KEY'],
             'glm': ['GLM_API_KEY', 'ZHIPU_API_KEY', 'DCC_AI_GLM_API_KEY'],
             'duojie': ['DUOJIE_API_KEY', 'DCC_AI_DUOJIE_API_KEY'],
             'openrouter': ['OPENROUTER_API_KEY', 'DCC_AI_OPENROUTER_API_KEY'],
+            'codemaker': ['CODEMAKER_API_KEY', 'DCC_AI_CODEMAKER_API_KEY'],
             'custom': ['CUSTOM_API_KEY', 'DCC_AI_CUSTOM_API_KEY'],
         }
         for env_var in env_map.get(provider, []):
@@ -77,6 +90,7 @@ class AIClientProvidersMixin:
                 'openai': 'openai_api_key', 'deepseek': 'deepseek_api_key',
                 'glm': 'glm_api_key', 'duojie': 'duojie_api_key',
                 'openrouter': 'openrouter_api_key',
+                'codemaker': 'codemaker_api_key',
                 'custom': 'custom_api_key',
             }
             return cfg.get(key_map.get(provider, '')) or None
@@ -90,7 +104,16 @@ class AIClientProvidersMixin:
         return bool(self._api_keys.get(provider))
 
     def _get_api_key(self, provider: str) -> Optional[str]:
-        return self._api_keys.get((provider or 'openai').lower())
+        provider = (provider or 'openai').lower()
+        # CodeMaker：token 会过期，每次请求重新读取（内部会用 refresh_key 静默刷新），
+        # 并同步回缓存，避免使用已过期的 token 触发 403。
+        if provider == 'codemaker':
+            fresh = self._read_api_key('codemaker')
+            if fresh:
+                self._api_keys['codemaker'] = fresh
+                return fresh
+            return self._api_keys.get('codemaker')
+        return self._api_keys.get(provider)
 
     def set_api_key(self, key: str, persist: bool = False, provider: str = 'openai') -> bool:
         provider = (provider or 'openai').lower()
@@ -102,7 +125,8 @@ class AIClientProvidersMixin:
             cfg, _ = load_config('ai', dcc_type='houdini')
             cfg = cfg or {}
             key_map = {'openai': 'openai_api_key', 'deepseek': 'deepseek_api_key', 'glm': 'glm_api_key',
-                       'openrouter': 'openrouter_api_key', 'custom': 'custom_api_key'}
+                       'openrouter': 'openrouter_api_key', 'codemaker': 'codemaker_api_key',
+                       'custom': 'custom_api_key'}
             cfg[key_map.get(provider, f'{provider}_api_key')] = key
             ok, _ = save_config('ai', cfg, dcc_type='houdini')
             return ok
@@ -179,6 +203,8 @@ class AIClientProvidersMixin:
             return self.DUOJIE_API_URL
         elif provider == 'openrouter':
             return self.OPENROUTER_API_URL
+        elif provider == 'codemaker':
+            return self.CODEMAKER_API_URL
         elif provider == 'custom':
             raw = self._CUSTOM_API_URL or self.OPENAI_API_URL
             return self._normalize_chat_url(raw)
@@ -189,6 +215,7 @@ class AIClientProvidersMixin:
             'openai': 'OpenAI', 'deepseek': 'DeepSeek',
             'glm': 'GLM（智谱AI）',
             'duojie': '拼好饭', 'openrouter': 'OpenRouter',
+            'codemaker': 'CodeMaker（网易）',
             'custom': 'Custom',
         }
         return names.get(provider, provider)
@@ -272,6 +299,7 @@ class AIClientProvidersMixin:
             'deepseek': 'deepseek-v4-flash',
             'glm': 'glm-4.7',
             'openrouter': 'anthropic/claude-sonnet-4.6',
+            'codemaker': 'claude-opus-4-8',
         }
         return defaults.get(provider, 'gpt-5.2')
 
