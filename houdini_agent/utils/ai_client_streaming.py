@@ -22,6 +22,11 @@ except ImportError:
     pass
 
 
+# CodeMaker（Claude 网关）保留了 "web_search" 作为内置服务端工具名，同名的自定义
+# 函数会让整个请求被拒。发送时替换为该别名，收到 tool_call 时再还原。
+_WEB_SEARCH_ALIAS = 'search_the_web'
+
+
 class AIClientStreamingMixin:
     """Streaming chat: Anthropic and OpenAI-compatible streaming."""
 
@@ -634,7 +639,16 @@ class AIClientStreamingMixin:
         # DeepSeek / OpenAI prompt caching 自动启用（保持前缀稳定即可命中）
 
         # 工具调用（所有支持 function calling 的 provider 通用）
+        # CodeMaker 后端是 Claude，"web_search" 与其内置服务端工具同名，会被网关拒绝
+        # （"The use of the web search tool is not supported."），故发送时改名，回传时还原。
+        _rename_web_search = provider == 'codemaker'
         if tools:
+            if _rename_web_search:
+                tools = [
+                    ({**t, 'function': {**t['function'], 'name': _WEB_SEARCH_ALIAS}}
+                     if (t.get('function') or {}).get('name') == 'web_search' else t)
+                    for t in tools
+                ]
             payload['tools'] = tools
             payload['tool_choice'] = tool_choice
 
@@ -724,6 +738,18 @@ class AIClientStreamingMixin:
                         except json.JSONDecodeError:
                             return results
 
+                        # 某些网关（CodeMaker/AIGW）用 HTTP 200 + SSE data 内嵌 error 报错，
+                        # 不当作错误处理会得到空流，UI 表现为"没有任何反应"。
+                        err_obj = data.get('error')
+                        if err_obj:
+                            if isinstance(err_obj, dict):
+                                _msg = err_obj.get('message') or json.dumps(err_obj, ensure_ascii=False)
+                            else:
+                                _msg = str(err_obj)
+                            print(f"[AI Client] Stream error frame: {_msg}")
+                            results.append({"type": "error", "error": _msg})
+                            return results
+
                         choices = data.get('choices', [])
                         usage_data = data.get('usage')
 
@@ -785,7 +811,10 @@ class AIClientStreamingMixin:
                                 if 'function' in tc:
                                     fn = tc['function']
                                     if 'name' in fn and fn['name']:
-                                        tool_calls_buffer[idx]['function']['name'] = fn['name']
+                                        _fname = fn['name']
+                                        if _rename_web_search and _fname == _WEB_SEARCH_ALIAS:
+                                            _fname = 'web_search'
+                                        tool_calls_buffer[idx]['function']['name'] = _fname
                                     if 'arguments' in fn:
                                         tool_calls_buffer[idx]['function']['arguments'] += fn['arguments']
                                         # ★ 广播 tool_call 参数增量 → UI 流式预览
@@ -1023,7 +1052,14 @@ class AIClientStreamingMixin:
 
         # DeepSeek / OpenAI prompt caching 自动启用
 
+        _rename_web_search = provider == 'codemaker'
         if tools:
+            if _rename_web_search:
+                tools = [
+                    ({**t, 'function': {**t['function'], 'name': _WEB_SEARCH_ALIAS}}
+                     if (t.get('function') or {}).get('name') == 'web_search' else t)
+                    for t in tools
+                ]
             payload['tools'] = tools
             payload['tool_choice'] = tool_choice
 
@@ -1062,10 +1098,17 @@ class AIClientStreamingMixin:
                 choice = obj.get('choices', [{}])[0]
                 message = choice.get('message', {})
 
+                _tcs = message.get('tool_calls')
+                if _rename_web_search and _tcs:
+                    for _tc in _tcs:
+                        _fn = _tc.get('function') or {}
+                        if _fn.get('name') == _WEB_SEARCH_ALIAS:
+                            _fn['name'] = 'web_search'
+
                 return {
                     'ok': True,
                     'content': message.get('content'),
-                    'tool_calls': message.get('tool_calls'),
+                    'tool_calls': _tcs,
                     'finish_reason': choice.get('finish_reason'),
                     'usage': self._parse_usage(obj.get('usage', {})),
                     'raw': obj
