@@ -162,23 +162,17 @@ Rectangle {
                     wrapMode: TextArea.Wrap
                     placeholderText: {
                         var m = composer.modes[composer.modeIndex]
-                        return m === "Ask" ? composer.loc("问一个关于场景的问题…  (只读模式)")
-                             : m === "Plan" ? composer.loc("描述目标，先生成可确认的执行计划…")
-                             : composer.loc("描述你想在场景里做的事…  (Enter 发送)")
+                        return m === "Ask" ? composer.loc("问一个关于场景的问题…  只读模式 · Ctrl+Enter 发送")
+                             : m === "Plan" ? composer.loc("描述目标，先出计划再执行…  Ctrl+Enter 发送")
+                             : composer.loc("描述你想在场景里做的事…  Ctrl+Enter 发送 · Enter 换行")
                     }
                     color: Theme.text
                     placeholderTextColor: Theme.textMute
                     font.family: Theme.fontBody
                     font.pixelSize: Theme.fBody
                     background: null
-                    Keys.onReturnPressed: function(e) {
-                        if (completer.opened && completer.items.length > 0) {
-                            composer.applyCompletion(completer.items[0].text); e.accepted = true; return
-                        }
-                        if (e.modifiers & Qt.ShiftModifier) { e.accepted = false; return }
-                        e.accepted = true
-                        composer.submit()
-                    }
+                    Keys.onReturnPressed: function(e) { composer.handleReturn(e) }
+                    Keys.onEnterPressed: function(e) { composer.handleReturn(e) }
                     Keys.onPressed: function(e) {
                         if ((e.modifiers & Qt.ControlModifier) && e.key === Qt.Key_V) {
                             if (controller) controller.pasteImage()   // text paste still proceeds
@@ -223,6 +217,15 @@ Rectangle {
             Text { text: controller ? controller.tokenText : "0 tokens"; color: Theme.ok; font.family: Theme.fontMono; font.pixelSize: Theme.fMicro }
             Item { Layout.fillWidth: true }
         }
+    }
+
+    function handleReturn(e) {
+        var ctrl = (e.modifiers & Qt.ControlModifier) || (e.modifiers & Qt.MetaModifier)
+        if (completer.opened && completer.items.length > 0 && !ctrl) {
+            composer.applyCompletion(completer.items[0].text); e.accepted = true; return
+        }
+        if (ctrl) { e.accepted = true; composer.submit(); return }
+        e.accepted = false   // 普通 Enter / Shift+Enter → 换行
     }
 
     function submit() {

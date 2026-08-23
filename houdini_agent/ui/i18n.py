@@ -84,7 +84,7 @@ _ZH = {
     'mode.tooltip': 'Agent: AI 自主操作节点\nAsk: 只读查询分析',
     'confirm': '确认',
     'confirm.tooltip': '确认模式：创建节点/VEX 前先预览确认',
-    'placeholder': '输入消息... (Enter 发送, Shift+Enter 换行, @提及节点)',
+    'placeholder': '输入消息... (Ctrl+Enter 发送, Enter 换行, @提及节点, /命令)',
     'attach_image.tooltip': '添加图片附件（支持 PNG/JPG/GIF/WebP，也可直接粘贴/拖拽图片到输入框）',
     'train.tooltip': '导出当前对话为训练数据（用于大模型微调）',
 
@@ -679,7 +679,7 @@ _EN = {
     'mode.tooltip': 'Agent: AI autonomously operates nodes\nAsk: Read-only query & analysis',
     'confirm': 'Confirm',
     'confirm.tooltip': 'Confirm mode: Preview before creating nodes/VEX',
-    'placeholder': 'Type a message... (Enter to send, Shift+Enter for newline, @mention nodes)',
+    'placeholder': 'Type a message... (Ctrl+Enter to send, Enter for newline, @mention nodes, /commands)',
     'attach_image.tooltip': 'Attach image (PNG/JPG/GIF/WebP, or paste/drag into input)',
     'train.tooltip': 'Export conversation as training data (for LLM fine-tuning)',
 

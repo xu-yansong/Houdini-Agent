@@ -151,7 +151,14 @@ _MESHY_URLS = {
 
 # QML UI strings — Chinese -> English (used by Controller.tr when lang == 'en')
 UI_EN = {
-    "描述你想在场景里做的事…  (Enter 发送)": "Describe what to build in the scene…  (Enter to send)",
+    "描述你想在场景里做的事…": "Describe what to build in the scene…",
+    "Ctrl+Enter 发送 · Enter 换行": "Ctrl+Enter to send · Enter for newline",
+    "描述你想在场景里做的事…  Ctrl+Enter 发送 · Enter 换行":
+        "Describe what to build in the scene…  Ctrl+Enter to send · Enter for newline",
+    "问一个关于场景的问题…  只读模式 · Ctrl+Enter 发送":
+        "Ask about the scene…  read-only · Ctrl+Enter to send",
+    "描述目标，先出计划再执行…  Ctrl+Enter 发送":
+        "Describe the goal — plan first, then execute…  Ctrl+Enter to send",
     "问一个关于场景的问题…  (只读模式)": "Ask about the scene…  (read-only)",
     "描述目标，先生成可确认的执行计划…": "Describe the goal — a plan will be proposed for approval…",
     "驳回": "Reject", "确认执行": "Confirm", "取消": "Cancel", "提交": "Submit",

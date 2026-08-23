@@ -560,7 +560,8 @@ class ChatInput(QtWidgets.QPlainTextEdit):
                     popup.setCurrentRow(row + 1)
                 return
 
-            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and not (event.modifiers() & QtCore.Qt.ShiftModifier):
+            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and not (
+                    event.modifiers() & (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier)):
                 # Enter: 选中当前项（而非发送消息）
                 current = popup.currentItem()
                 if current:
@@ -597,7 +598,8 @@ class ChatInput(QtWidgets.QPlainTextEdit):
                 popup.select_next()
                 return
 
-            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and not (event.modifiers() & QtCore.Qt.ShiftModifier):
+            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and not (
+                    event.modifiers() & (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier)):
                 if popup.confirm_current():
                     return
 
@@ -610,10 +612,9 @@ class ChatInput(QtWidgets.QPlainTextEdit):
             return
 
         # ── 常规键盘处理 ──
+        # Ctrl/Cmd + Enter 发送，单独 Enter 换行
         if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-            if event.modifiers() & QtCore.Qt.ShiftModifier:
-                super().keyPressEvent(event)
-            else:
+            if event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier):
                 self.sendRequested.emit()
                 return
 
