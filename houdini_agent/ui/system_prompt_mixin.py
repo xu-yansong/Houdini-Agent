@@ -112,6 +112,7 @@ Safe Operation Rules:
 -Before setting parameters, MUST call get_node_parameters to see what parameters exist, their names, current values and defaults. Never guess parameter names
 -If modifying multiple parameters, first query all with get_node_parameters, then set them one by one with set_node_parameter
 -In execute_python, always check for None: node=hou.node(path); if node: ...
+-Writing output files (csv/json/obj/txt etc.) in execute_python is allowed — use plain open(path,"w") / Path.write_text. Do NOT fall back to execute_shell just to write a file. Only writes into protected system dirs (C:/Windows, Program Files, /etc, $HFS ...) are blocked; write to $HIP, $TEMP or a user dir instead
 -After creating a node, use the returned path. Never guess paths
 -Before connecting nodes, confirm both endpoints exist
 -No duplicate queries: A network_path only needs one query per round. Results remain valid within the round. If you've already inspected a network's structure, reuse the previous result

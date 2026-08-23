@@ -1148,6 +1148,7 @@ class AIClientAgentMixin:
 -首次了解网络时调用get_network_structure,已查询过的网络不要重复调用(系统缓存同轮查询结果)
 -设置参数前必须先用get_node_parameters查询正确的参数名和类型,不要猜测参数名
 -execute_python中必须检查None:node=hou.node(path);if node:...
+-execute_python可直接写文件(open(p,"w")/Path.write_text),不要为了写文件改用execute_shell;仅禁止写入系统目录(C:/Windows、Program Files、/etc、$HFS),请写到$HIP/$TEMP/用户目录
 -创建节点后用返回的路径操作,不要猜测路径
 -连接节点前确认两个节点都已存在
 

@@ -611,11 +611,82 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
         'tar', 'zip', 'unzip', '7z',
     })
 
+    # ========================================
+    # 受保护路径（Python 与 Shell 共用）
+    # ========================================
+
+    # 禁止写入的系统目录前缀（规范化为小写 + 正斜杠后比较）
+    _PROTECTED_PREFIXES = (
+        'c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata',
+        '/etc', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys',
+        '/usr/bin', '/usr/sbin', '/usr/lib', '/library', '/system',
+    )
+
+    # 空设备（丢弃输出用），允许写入
+    _NULL_DEVICES = frozenset({'nul', '/dev/null'})
+
+    @staticmethod
+    def _norm_path(p: str) -> str:
+        s = p.strip().strip('"\'').replace('\\', '/').lower()
+        return re.sub(r'/+', '/', s).rstrip('/')
+
+    @classmethod
+    def _is_protected_path(cls, path: str) -> bool:
+        """判断路径是否落在受保护的系统目录（含 Houdini 安装目录 $HFS）内"""
+        p = cls._norm_path(path)
+        if not p:
+            return False
+        prefixes = list(cls._PROTECTED_PREFIXES)
+        hfs = os.environ.get('HFS', '')
+        if hfs:
+            prefixes.append(cls._norm_path(hfs))
+        for pre in prefixes:
+            if p == pre or p.startswith(pre + '/'):
+                return True
+        return False
+
+    @classmethod
+    def _is_null_device(cls, path: str) -> bool:
+        return cls._norm_path(path) in cls._NULL_DEVICES
+
+    @classmethod
+    def _find_protected_literal(cls, code: str, exclude: Optional[set] = None) -> Optional[str]:
+        """在代码的字符串字面量中查找指向受保护目录的路径，返回首个命中项"""
+        for m in re.finditer(r'["\']([^"\'\n]{3,})["\']', code):
+            lit = m.group(1)
+            if exclude and lit in exclude:
+                continue
+            if ('/' in lit or '\\' in lit) and cls._is_protected_path(lit):
+                return lit
+        return None
+
+    # 重定向 / tee 的写入目标（支持带引号、含空格的路径）
+    _REDIR_TARGET_RE = re.compile(r'(?:>>?|\|\s*tee(?:\s+-{1,2}\w+)*)\s*(?:"([^"]+)"|([^\s|&;]+))')
+
+    # 会落盘的文件操作命令（copy/move 等），参数中出现的路径一并检查
+    _FILE_WRITE_CMD_RE = re.compile(r'\b(?:copy|move|ren|rename|cp|mv|xcopy|robocopy)\b', re.IGNORECASE)
+
+    def _iter_shell_write_targets(self, command: str):
+        """提取命令中可能的写入目标路径"""
+        for m in self._REDIR_TARGET_RE.finditer(command):
+            yield m.group(1) or m.group(2) or ''
+        if self._FILE_WRITE_CMD_RE.search(command):
+            for quoted, bare in re.findall(r'"([^"]+)"|(\S+)', command):
+                yield quoted or bare
+
     def _check_shell_security(self, command: str) -> Optional[str]:
         """检查 Shell 命令是否包含危险操作"""
         for pattern, msg in self._SHELL_DANGEROUS_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
                 return f"安全拦截: {msg}\n命令: {command}\n如确需执行，请在系统终端中手动运行。"
+
+        # 重定向 / tee / copy·move 等写入受保护系统目录
+        for target in self._iter_shell_write_targets(command):
+            if self._is_null_device(target):
+                continue
+            if self._is_protected_path(target):
+                return (f"安全拦截: 禁止写入受保护的系统目录: {target}\n"
+                        f"命令: {command}\n请改写到 $HIP、$TEMP 或用户目录下。")
         return None
 
     def _tool_execute_shell(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1237,17 +1308,67 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
         (r'\bos\.system\b', "禁止使用 os.system 执行系统命令"),
         (r'\bsubprocess\b', "禁止使用 subprocess 执行外部进程"),
         (r'\b__import__\b', "禁止使用 __import__ 动态导入"),
-        (r'\bopen\s*\([^)]*["\']w["\']', "禁止以写入模式打开文件（可用读取模式）"),
         (r'\bhou\.exit\b', "禁止使用 hou.exit 退出 Houdini"),
         (r'\bhou\.hipFile\.clear\b', "禁止使用 hou.hipFile.clear 清空场景"),
     ]
+
+    # open() 写模式字符串：仅由模式字符组成且含 w/a/x/+（r+/r+b 等亦具备写入能力）
+    _OPEN_WRITE_MODE = r'["\'][rwxab+]*[wax+][rwxab+]*["\']'
+
+    # open("路径字面量", ..., 写模式)：写入目标明确，直接校验该字面量
+    _OPEN_WRITE_LITERAL_RE = re.compile(
+        r'\bopen\s*\(\s*(?:file\s*=\s*)?["\']([^"\'\n]+)["\'][^)]*' + _OPEN_WRITE_MODE
+    )
+
+    # open("路径字面量", ...)：用于识别只读调用中的路径
+    _OPEN_LITERAL_RE = re.compile(
+        r'\bopen\s*\(\s*(?:file\s*=\s*)?["\']([^"\'\n]+)["\']'
+    )
+
+    # 其他写入 API（目标可能为变量，需扫描字符串字面量辅助判断）
+    _WRITE_API_PATTERN = (
+        r'\bwrite_text\s*\(|\bwrite_bytes\s*\(|\bos\.truncate\b'
+        r'|\bshutil\.(copy\w*|move)\s*\(|\bos\.replace\b|\bos\.rename\b'
+        r'|\.savefig\s*\(|\bnp\.save\w*\s*\(|\bjson\.dump\s*\('
+        r'|\.to_(?:csv|json|excel|pickle)\s*\('
+    )
 
     def _check_code_security(self, code: str) -> Optional[str]:
         """检查代码是否包含危险操作，返回警告消息或 None"""
         for pattern, msg in self._DANGEROUS_PATTERNS:
             if re.search(pattern, code):
                 return f"⛔ 安全拦截: {msg}\n如确需执行，请在 Houdini Python Shell 中手动运行。"
+
+        # 写文件本身允许，但不得写入受保护的系统目录
+        # 1) open("路径字面量", 写模式)：写入目标明确，直接校验
+        for m in self._OPEN_WRITE_LITERAL_RE.finditer(code):
+            if self._is_protected_path(m.group(1)):
+                return (f"⛔ 安全拦截: 禁止写入受保护的系统目录: {m.group(1)}\n"
+                        f"请改写到 $HIP、$TEMP 或用户目录下。")
+
+        # 2) 其他写入方式（write_text/savefig/to_csv/路径为变量的 open 等）：
+        #    扫描全部字符串字面量，排除只读调用中的路径，避免误伤读取系统文件
+        has_open_write = (re.search(r'\bopen\s*\(', code)
+                          and re.search(self._OPEN_WRITE_MODE, code))
+        if has_open_write or re.search(self._WRITE_API_PATTERN, code):
+            read_only = self._find_read_only_literals(code)
+            bad = self._find_protected_literal(code, exclude=read_only)
+            if bad:
+                return (f"⛔ 安全拦截: 禁止写入受保护的系统目录: {bad}\n"
+                        f"请改写到 $HIP、$TEMP 或用户目录下。")
         return None
+
+    @classmethod
+    def _find_read_only_literals(cls, code: str) -> set:
+        """收集只读调用（读模式 open / read_text / read_bytes）中的路径字面量"""
+        read_only = set()
+        write_spans = [m.span() for m in cls._OPEN_WRITE_LITERAL_RE.finditer(code)]
+        for m in cls._OPEN_LITERAL_RE.finditer(code):
+            if not any(s <= m.start(1) and m.end(1) <= e for s, e in write_spans):
+                read_only.add(m.group(1))
+        for m in re.finditer(r'["\']([^"\'\n]+)["\']\s*\)\s*\.\s*read_(?:text|bytes)\s*\(', code):
+            read_only.add(m.group(1))
+        return read_only
 
     # 这些工具出错时应提示 AI 先查阅文档再重试，不要盲目重试
     _DOC_CHECK_TOOLS: frozenset = frozenset({
