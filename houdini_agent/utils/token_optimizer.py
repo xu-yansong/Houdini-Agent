@@ -101,6 +101,8 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
     'claude-sonnet-4-5':    {'input': 3.00,  'input_cache': 0.30,  'output': 15.00, 'reasoning': 15.00},
     'claude-sonnet-4-6':    {'input': 3.00,  'input_cache': 0.30,  'output': 15.00, 'reasoning': 15.00},
     'claude-haiku-4-5':     {'input': 0.80,  'input_cache': 0.08,  'output': 4.00},
+    'claude-opus-4-8':      {'input': 15.00, 'input_cache': 1.50,  'output': 75.00, 'reasoning': 75.00},
+    'claude-opus-5':        {'input': 15.00, 'input_cache': 1.50,  'output': 75.00, 'reasoning': 75.00},
     # ---- Gemini ----
     'gemini-3-pro-image-preview': {'input': 1.25, 'input_cache': 0.30, 'output': 10.00},
     'gemini-3-flash':       {'input': 0.50,  'input_cache': 0.125, 'output': 3.00},
@@ -109,6 +111,7 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
     'glm-4.7':              {'input': 0.50,  'input_cache': 0.50,  'output': 0.50},
     'glm-5-turbo':          {'input': 0.50,  'input_cache': 0.50,  'output': 0.50},
     'glm-5.1':              {'input': 0.50,  'input_cache': 0.50,  'output': 0.50},
+    'glm-5.3':              {'input': 0.50,  'input_cache': 0.50,  'output': 0.50},
     # ---- Kimi ----
     'kimi-k2.5':            {'input': 2.00,  'input_cache': 0.50,  'output': 8.00},
     # ---- MiniMax ----

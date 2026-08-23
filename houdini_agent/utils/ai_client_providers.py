@@ -299,7 +299,7 @@ class AIClientProvidersMixin:
             'deepseek': 'deepseek-v4-flash',
             'glm': 'glm-4.7',
             'openrouter': 'anthropic/claude-sonnet-4.6',
-            'codemaker': 'claude-opus-4-8',
+            'codemaker': 'claude-opus-5',
         }
         return defaults.get(provider, 'gpt-5.2')
 

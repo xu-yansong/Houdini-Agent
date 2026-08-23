@@ -50,7 +50,7 @@ MODEL_MAP = {
     "openai": ["gpt-5.2", "gpt-5.3-codex"],
     "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
     "glm": ["glm-4.7"],
-    "codemaker": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "glm-5.1"],
+    "codemaker": ["claude-opus-5", "claude-opus-4-8", "glm-5.3", "glm-5.1"],
     "custom": [],
 }
 PROVIDER_LABELS = {
@@ -69,6 +69,7 @@ CONTEXT_LIMITS = {
     "deepseek-reasoner": 1048576, "glm-4.7": 200000,
     "claude-opus-4-6": 1000000,
     "claude-opus-4-7": 1000000, "claude-opus-4-8": 1000000,
+    "claude-opus-5": 1000000, "glm-5.3": 200000,
 }
 VISION_MODELS = {
     "claude-opus-4-6-max", "claude-opus-4-6-gemini", "claude-sonnet-4-6",
@@ -77,7 +78,7 @@ VISION_MODELS = {
     "anthropic/claude-haiku-4.5", "openai/gpt-5.2",
     "google/gemini-3-flash-preview", "x-ai/grok-4.1-fast",
     "gpt-5.2", "gpt-5.3-codex",
-    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
 }
 # tools safe to run off the Qt main thread (no hou.* access)
 BG_SAFE = {"web_search", "fetch_webpage", "search_local_doc", "get_houdini_node_doc",

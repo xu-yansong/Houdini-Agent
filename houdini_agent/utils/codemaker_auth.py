@@ -26,7 +26,7 @@ from typing import Optional, Tuple
 # ============================================================
 
 CODEMAKER_API_URL = "https://api-code-maker.nie.netease.com/openai/v1/chat/completions"
-CODEMAKER_DEFAULT_MODEL = "claude-opus-4-8"
+CODEMAKER_DEFAULT_MODEL = "claude-opus-5"
 
 # Windows PowerShell 安装命令
 _INSTALL_PS1_URL = "https://codemaker.netease.com/package/codemaker-cli/install.ps1"
