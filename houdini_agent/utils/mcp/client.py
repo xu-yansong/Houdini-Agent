@@ -566,13 +566,7 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
 
     # Shell 命令黑名单（正则，忽略大小写）
     _SHELL_DANGEROUS_PATTERNS = [
-        # 文件/目录批量删除
-        (r'\brm\s+.*-r', "禁止递归删除 (rm -r)"),
-        (r'\brm\s+.*-f', "禁止强制删除 (rm -f)"),
-        (r'\brmdir\s+/s', "禁止递归删除目录 (rmdir /s)"),
-        (r'\bdel\s+/s', "禁止递归删除 (del /s)"),
-        (r'\bdel\s+/q', "禁止静默删除 (del /q)"),
-        (r'\brd\s+/s', "禁止递归删除 (rd /s)"),
+        # 注：rm/del/rd/Remove-Item 等删除命令不走黑名单，由 _check_shell_delete 校验删除目标是否在可删区内
         # 格式化
         (r'\bformat\s+[a-zA-Z]:', "禁止格式化磁盘"),
         # 注册表
@@ -588,7 +582,6 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
         # 进程注入
         (r'\btaskkill\s+/f', "禁止强制结束进程"),
         # 危险 PowerShell
-        (r'Remove-Item\s+.*-Recurse', "禁止 PowerShell 递归删除"),
         (r'Invoke-Expression', "禁止 Invoke-Expression"),
         (r'\biex\b', "禁止 iex (Invoke-Expression 别名)"),
         # 磁盘操作
@@ -649,6 +642,330 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
     def _is_null_device(cls, path: str) -> bool:
         return cls._norm_path(path) in cls._NULL_DEVICES
 
+    # ========================================
+    # 可删区（AI 唯一允许删除文件/目录的位置）
+    # ========================================
+
+    # 可删区：$HIP/.agent_tmp 与 $TEMP/houdini_agent
+    _DELETABLE_HIP_SUBDIR = '.agent_tmp'
+    _DELETABLE_TEMP_SUBDIR = 'houdini_agent'
+
+    @staticmethod
+    def _expand_vars(path: str) -> str:
+        """展开 $HIP/$JOB/%TEMP%/~ 等变量（优先用 hou.expandvars）"""
+        s = path.strip().strip('"\'')
+        if not s:
+            return ''
+        if hou is not None and ('$' in s or '<' in s):
+            try:
+                s = hou.expandvars(s)
+            except Exception:
+                pass
+        return os.path.expanduser(os.path.expandvars(s))
+
+    @classmethod
+    def _norm_fs_path(cls, path: str) -> str:
+        """删除校验专用规范化：展开变量 → 绝对化 → 消除 .. → 统一斜杠（Windows 转小写）"""
+        s = cls._expand_vars(path)
+        if not s:
+            return ''
+        try:
+            s = os.path.realpath(s)
+        except Exception:
+            return ''
+        s = re.sub(r'/+', '/', s.replace('\\', '/')).rstrip('/')
+        return s.lower() if os.name == 'nt' else s
+
+    @classmethod
+    def _deletable_roots(cls) -> List[str]:
+        """可删区根目录列表（规范化后）"""
+        import tempfile
+        raw = []
+        hip = ''
+        if hou is not None:
+            try:
+                hip = hou.expandvars('$HIP')
+            except Exception:
+                hip = ''
+        hip = hip or os.environ.get('HIP', '')
+        if hip:
+            raw.append(os.path.join(hip, cls._DELETABLE_HIP_SUBDIR))
+        try:
+            raw.append(os.path.join(tempfile.gettempdir(), cls._DELETABLE_TEMP_SUBDIR))
+        except Exception:
+            pass
+        roots = []
+        for r in raw:
+            n = cls._norm_fs_path(r)
+            if n and not cls._is_protected_path(n) and n not in roots:
+                roots.append(n)
+        return roots
+
+    @classmethod
+    def _is_deletable_path(cls, path: str, base: str = '') -> bool:
+        """路径是否位于可删区内（可删区根目录本身不允许删除）
+
+        base: 相对路径的基准目录（如 shell 复合命令中 cd 的目标），为空时不做相对解析
+        """
+        roots = cls._deletable_roots()
+        p = cls._norm_fs_path(path)
+        if p:
+            for root in roots:
+                if p.startswith(root + '/'):
+                    return True
+        if base:
+            exp = cls._expand_vars(path)
+            if exp and not re.match(r'^(?:[a-zA-Z]:|[\\/])', exp):
+                p2 = cls._norm_fs_path(cls._expand_vars(base).rstrip('\\/') + '/' + exp)
+                for root in roots:
+                    if p2.startswith(root + '/'):
+                        return True
+        return False
+
+    @classmethod
+    def _deletable_hint(cls) -> str:
+        """可删区说明（拦截提示中附带）"""
+        roots = cls._deletable_roots() or ['(未能解析可删区路径)']
+        return ("只有可删区内的文件/目录允许删除:\n"
+                + "\n".join(f"  - {r}" for r in roots)
+                + "\n临时/测试产物请写到 $HIP/.agent_tmp 或 $TEMP/houdini_agent"
+                  "（Python 中用 hou.expandvars(\"$HIP/.agent_tmp\") 展开），任务结束后可自行清理。\n"
+                  "其他位置的文件一律不能删除，请提示用户手动删除。")
+
+    # ========================================
+    # 删除目标的静态解析
+    # ========================================
+
+    # 删除类 API：函数式（os.remove(...) / shutil.rmtree(...)）与方法式（p.unlink() / p.rmdir()）
+    # 注：os.removedirs 会向上逐级删除父目录，无法静态限定范围，不走本机制，直接进黑名单
+    _FUNC_DELETE_RE = re.compile(
+        r'\b(?:os\.(?:remove|unlink|rmdir)|shutil\.rmtree)\s*\('
+    )
+    _METHOD_DELETE_RE = re.compile(r'\.\s*(?:unlink|rmdir)\s*\(')
+
+    # 变量赋值（RHS 由 _clean_rhs 截掉顶层 ';' 后的其他语句与 '#' 注释）
+    _ASSIGN_RE = re.compile(r'^[ \t]*(\w+)\s*=\s*(.+?)[ \t]*$', re.MULTILINE)
+
+    # 会改变变量运行时取值的重绑定形式：for 目标 / as 目标 / 海象 / 元组解包
+    _FOR_TARGET_RE = re.compile(r'\bfor\s+([^:\n=]+?)\s+in\b')
+    _AS_TARGET_RE = re.compile(r'\bas\s+(\w+)\b')
+    _WALRUS_RE = re.compile(r'\b(\w+)\s*:=')
+    _TUPLE_ASSIGN_RE = re.compile(r'^[ \t]*([\w\s,]+)=', re.MULTILINE)
+
+    @classmethod
+    def _rebound_names(cls, code: str) -> frozenset:
+        """收集会被 for/with-as/海象运算符/元组解包重新绑定的变量名（这类变量的
+        运行时取值可能与静态解析不符，禁止作为删除目标）"""
+        names = set()
+        for m in cls._FOR_TARGET_RE.finditer(code):
+            names.update(re.findall(r'\w+', m.group(1)))
+        for m in cls._AS_TARGET_RE.finditer(code):
+            names.add(m.group(1))
+        for m in cls._WALRUS_RE.finditer(code):
+            names.add(m.group(1))
+        for m in cls._TUPLE_ASSIGN_RE.finditer(code):
+            if ',' in m.group(1):
+                names.update(re.findall(r'\w+', m.group(1)))
+        return frozenset(names)
+
+    @staticmethod
+    def _clean_rhs(rhs: str) -> str:
+        """截掉 RHS 顶层 ';' 之后的其他语句与 '#' 注释（引号内不截断）"""
+        out = []
+        quote = ''
+        for c in rhs:
+            if quote:
+                out.append(c)
+                if c == quote:
+                    quote = ''
+                continue
+            if c in '"\'':
+                quote = c
+                out.append(c)
+                continue
+            if c in ';#':
+                break
+            out.append(c)
+        return ''.join(out).strip()
+
+    # 可静态求值的路径包装函数
+    _PATH_WRAPPER_FUNCS = frozenset({
+        'path', 'pathlib.path', 'str', 'os.fspath',
+        'hou.expandvars', 'os.path.expandvars', 'os.path.expanduser',
+        'os.path.normpath', 'os.path.abspath',
+    })
+
+    @staticmethod
+    def _split_top_args(text: str) -> List[str]:
+        """按顶层逗号切分参数（忽略括号与引号内的逗号）"""
+        args, depth, quote, start = [], 0, '', 0
+        for i, c in enumerate(text):
+            if quote:
+                if c == quote:
+                    quote = ''
+                continue
+            if c in '"\'':
+                quote = c
+            elif c in '([{':
+                depth += 1
+            elif c in ')]}':
+                depth -= 1
+            elif c == ',' and depth == 0:
+                args.append(text[start:i])
+                start = i + 1
+        args.append(text[start:])
+        return [a.strip() for a in args if a.strip()]
+
+    @staticmethod
+    def _balanced_call_args(code: str, open_idx: int) -> Optional[str]:
+        """从 '(' 位置提取完整的参数文本（括号/引号平衡）"""
+        depth, quote = 0, ''
+        for i in range(open_idx, len(code)):
+            c = code[i]
+            if quote:
+                if c == quote:
+                    quote = ''
+                continue
+            if c in '"\'':
+                quote = c
+            elif c in '([{':
+                depth += 1
+            elif c in ')]}':
+                depth -= 1
+                if depth == 0:
+                    return code[open_idx + 1:i]
+        return None
+
+    @staticmethod
+    def _receiver_expr(code: str, dot_idx: int) -> str:
+        """向左提取 `.unlink(` / `.rmdir(` 的接收者表达式"""
+        i = dot_idx
+        while i > 0 and code[i - 1] in ' \t':
+            i -= 1
+        if i > 0 and code[i - 1] in ')]':
+            depth, j = 0, i - 1
+            while j >= 0:
+                c = code[j]
+                if c in ')]}':
+                    depth += 1
+                elif c in '([{':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j -= 1
+            if j < 0:
+                return ''
+            i = j
+        j = i
+        while j > 0 and (code[j - 1].isalnum() or code[j - 1] in '._'):
+            j -= 1
+        return code[j:dot_idx].strip()
+
+    @classmethod
+    def _static_path(cls, expr: str, assigns: List[Tuple[int, str, str]],
+                     before: int, depth: int = 0,
+                     poison: frozenset = frozenset()) -> Optional[str]:
+        """静态求值路径表达式，无法确定时返回 None
+
+        支持：字符串字面量、Path()/expandvars() 等包装、os.path.join(全字面量)、
+        Path("a") / "b" 拼接、以及整个代码中只赋值一次且未被 for/with/as 等
+        重绑定的变量（多次赋值或条件分支赋值会导致运行时取值与静态解析不符，一律拒绝）。
+        """
+        expr = expr.strip()
+        if not expr or depth > 8:
+            return None
+
+        m = re.fullmatch(r'[rbuRBU]{0,2}(["\'])(.*?)\1', expr, re.DOTALL)
+        if m:
+            return m.group(2)
+
+        m = re.fullmatch(r'([\w.]+)\s*\((.*)\)', expr, re.DOTALL)
+        if m:
+            fn, inner = m.group(1).lower(), m.group(2)
+            parts = cls._split_top_args(inner)
+            if fn in cls._PATH_WRAPPER_FUNCS:
+                return cls._static_path(parts[0], assigns, before, depth + 1, poison) if parts else None
+            if fn == 'os.path.join':
+                resolved = []
+                for a in parts:
+                    p = cls._static_path(a, assigns, before, depth + 1, poison)
+                    if p is None:
+                        return None
+                    resolved.append(p)
+                return os.path.join(*resolved) if resolved else None
+            return None
+
+        # Path("a") / "b" / var 形式的拼接
+        segs = cls._split_top_slash(expr)
+        if segs and len(segs) > 1:
+            resolved = []
+            for s in segs:
+                p = cls._static_path(s, assigns, before, depth + 1, poison)
+                if p is None:
+                    return None
+                resolved.append(p)
+            return os.path.join(*resolved)
+
+        if re.fullmatch(r'\w+', expr):
+            if expr in poison:
+                return None
+            hits = [(pos, rhs) for pos, name, rhs in assigns if name == expr]
+            if len(hits) != 1 or hits[0][0] >= before:
+                return None
+            return cls._static_path(hits[0][1], assigns, before, depth + 1, poison)
+        return None
+
+    @staticmethod
+    def _split_top_slash(text: str) -> List[str]:
+        """按顶层 `/` 运算符切分（Path("a") / "b"），引号与括号内不切分"""
+        segs, depth, quote, start = [], 0, '', 0
+        for i, c in enumerate(text):
+            if quote:
+                if c == quote:
+                    quote = ''
+                continue
+            if c in '"\'':
+                quote = c
+            elif c in '([{':
+                depth += 1
+            elif c in ')]}':
+                depth -= 1
+            elif c == '/' and depth == 0:
+                segs.append(text[start:i])
+                start = i + 1
+        segs.append(text[start:])
+        return [s.strip() for s in segs if s.strip()]
+
+    @classmethod
+    def _find_delete_targets(cls, code: str) -> List[Tuple[int, str]]:
+        """定位代码中的删除调用，返回 [(位置, 目标表达式)]"""
+        targets = []
+        for m in cls._FUNC_DELETE_RE.finditer(code):
+            inner = cls._balanced_call_args(code, m.end() - 1)
+            args = cls._split_top_args(inner) if inner is not None else []
+            targets.append((m.start(), args[0] if args else ''))
+        for m in cls._METHOD_DELETE_RE.finditer(code):
+            targets.append((m.start(), cls._receiver_expr(code, m.start())))
+        return targets
+
+    def _check_delete_code(self, code: str) -> Optional[str]:
+        """Python 删除校验：目标必须静态可解析，且位于可删区内"""
+        assigns = [(m.start(), m.group(1), self._clean_rhs(m.group(2)))
+                   for m in self._ASSIGN_RE.finditer(code)]
+        poison = self._rebound_names(code)
+        for pos, expr in self._find_delete_targets(code):
+            path = self._static_path(expr, assigns, pos, 0, poison)
+            if path is None:
+                return (f"⛔ 安全拦截: 无法静态确认删除目标: {expr or '(空)'}\n"
+                        f"删除目标必须是路径字面量，或整个代码中只赋值一次的变量"
+                        f"（不能经 for/with/as/元组解包/多次赋值产生）"
+                        f"（如 p = hou.expandvars(\"$HIP/.agent_tmp/out\"); shutil.rmtree(p)）。\n"
+                        + self._deletable_hint())
+            if not self._is_deletable_path(path):
+                return (f"⛔ 安全拦截: 禁止删除可删区之外的路径: {path}\n"
+                        + self._deletable_hint())
+        return None
+
     @classmethod
     def _find_protected_literal(cls, code: str, exclude: Optional[set] = None) -> Optional[str]:
         """在代码的字符串字面量中查找指向受保护目录的路径，返回首个命中项"""
@@ -666,19 +983,182 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
     # 会落盘的文件操作命令（copy/move 等），参数中出现的路径一并检查
     _FILE_WRITE_CMD_RE = re.compile(r'\b(?:copy|move|ren|rename|cp|mv|xcopy|robocopy)\b', re.IGNORECASE)
 
+    # 删除命令关键词（全命令扫描；前界含 '-' 以覆盖 find -delete / rsync --del，
+    # 后界含 '(' 以覆盖 os.remove(...)；powershell -Command "..." 等包装形式由
+    # _INTERPRETER_RE + _shell_tokens 递归处理）
+    _SHELL_DELETE_TOKEN_RE = re.compile(
+        r'(?:^|[\s;&|(=\-\'"`])(?:rm|del|erase|rd|rmdir|unlink|ri|remove-item|delete'
+        r'|os\.(?:remove|unlink|rmdir|removedirs)|shutil\.rmtree)'
+        r'(?:$|[\s;&|)(=\'"`])',
+        re.IGNORECASE)
+
+    # 删除关键词集合（token 级精确排除用）
+    _DELETE_KEYWORDS = frozenset(
+        {'rm', 'del', 'erase', 'rd', 'rmdir', 'unlink', 'ri', 'remove-item', 'delete'})
+
+    # 子句以删除命令开头（此时其后的裸 token 也视为删除目标，支持 cd 后的相对路径）
+    _DELETE_CMD_START_RE = re.compile(
+        r'^\s*(?:rm|del|erase|rd|rmdir|unlink|ri|remove-item|delete)(?=[\s/]|$)',
+        re.IGNORECASE)
+
+    # 解释器包装：引号内的删除关键词只有出现在这些命令中才视为真正的删除调用
+    _INTERPRETER_RE = re.compile(
+        r'\b(?:powershell|pwsh|cmd|bash|sh|zsh|csh|ksh|python\d*|hython)\b', re.IGNORECASE)
+
+    # cd 子句（用于解析后续相对路径删除目标）
+    _CD_RE = re.compile(r'^(?:cd|set-location)\b', re.IGNORECASE)
+
+    # 命令行选项：unix 的 -r/--force 与 windows 的 /s /q /a:r（注意 /tmp 这类路径不会命中）
+    _SHELL_FLAG_RE = re.compile(r'-{1,2}[a-z][\w-]*|/[a-z](?::\w+)?', re.IGNORECASE)
+
+    # 纯符号 token（重定向、管道等）
+    _SHELL_SYMBOL_RE = re.compile(r'[<>|&()\[\]{}*?]+|\d+>&?\d*')
+
+    @classmethod
+    def _iter_redirect_targets(cls, command: str):
+        """提取重定向 / tee 的写入目标"""
+        for m in cls._REDIR_TARGET_RE.finditer(command):
+            yield m.group(1) or m.group(2) or ''
+
     def _iter_shell_write_targets(self, command: str):
         """提取命令中可能的写入目标路径"""
-        for m in self._REDIR_TARGET_RE.finditer(command):
-            yield m.group(1) or m.group(2) or ''
+        yield from self._iter_redirect_targets(command)
         if self._FILE_WRITE_CMD_RE.search(command):
             for quoted, bare in re.findall(r'"([^"]+)"|(\S+)', command):
                 yield quoted or bare
+
+    @classmethod
+    def _shell_tokens(cls, command: str) -> List[str]:
+        """拆分命令 token；带引号的子命令（含删除关键词）会继续向内拆分"""
+        tokens = []
+        for m in re.finditer(r'"([^"]*)"|\'([^\']*)\'|(\S+)', command):
+            quoted = m.group(1) if m.group(1) is not None else m.group(2)
+            tok = quoted if quoted is not None else m.group(3)
+            if not tok:
+                continue
+            if quoted is not None and cls._SHELL_DELETE_TOKEN_RE.search(tok):
+                tokens.extend(cls._shell_tokens(tok))
+            else:
+                tokens.append(tok)
+        return tokens
+
+    @staticmethod
+    def _split_shell_segments(command: str) -> List[str]:
+        """按顶层 ; & | 切分复合命令（引号与括号内不切分）"""
+        segs, cur, depth, quote = [], [], 0, ''
+        for c in command:
+            if quote:
+                cur.append(c)
+                if c == quote:
+                    quote = ''
+                continue
+            if c in '"\'':
+                quote = c
+                cur.append(c)
+            elif c in '([{':
+                depth += 1
+                cur.append(c)
+            elif c in ')]}':
+                depth -= 1
+                cur.append(c)
+            elif c in ';|&' and depth == 0:
+                segs.append(''.join(cur))
+                cur = []
+            else:
+                cur.append(c)
+        segs.append(''.join(cur))
+        return [s.strip() for s in segs if s.strip()]
+
+    @staticmethod
+    def _strip_quoted(text: str) -> str:
+        """把引号内的内容替换为空格（用于判断关键词是否在命令位置）"""
+        out, quote = [], ''
+        for c in text:
+            if quote:
+                out.append(' ')
+                if c == quote:
+                    quote = ''
+                continue
+            if c in '"\'':
+                out.append(' ')
+                quote = c
+            else:
+                out.append(c)
+        return ''.join(out)
+
+    @classmethod
+    def _looks_like_path(cls, tok: str) -> bool:
+        """token 是否像一个文件/目录路径（用于删除目标校验）"""
+        if cls._SHELL_FLAG_RE.fullmatch(tok) or cls._SHELL_SYMBOL_RE.fullmatch(tok):
+            return False
+        return bool('/' in tok or '\\' in tok or '.' in tok
+                    or '$' in tok or '%' in tok or '~' in tok
+                    or re.match(r'^[a-zA-Z]:', tok))
+
+    def _cd_target(self, seg: str) -> str:
+        """提取 cd 子句的目标目录（供后续相对路径解析）"""
+        for tok in self._shell_tokens(seg)[1:]:
+            if self._SHELL_FLAG_RE.fullmatch(tok) or self._SHELL_SYMBOL_RE.fullmatch(tok):
+                continue
+            return tok
+        return ''
+
+    def _check_shell_delete(self, command: str) -> Optional[str]:
+        """Shell 删除校验：删除子句中出现的目标路径必须位于可删区内
+
+        - 按 ; & | 切分子句，只校验含删除命令的子句（不误伤同一条复合命令中的其他路径）
+        - 删除关键词仅在引号内出现时，需子句（或整条命令）含解释器包装才视为删除命令，
+          避免 git commit -m "rm old code" 这类文本误伤
+        - 跟踪 cd 目标，使「cd 可删区 && rm 相对路径」可用
+        """
+        if not self._SHELL_DELETE_TOKEN_RE.search(command):
+            return None
+        has_interpreter = bool(self._INTERPRETER_RE.search(command))
+        cwd_hint = ''
+        for seg in self._split_shell_segments(command):
+            kw_outside = bool(self._SHELL_DELETE_TOKEN_RE.search(self._strip_quoted(seg)))
+            if not kw_outside and not self._SHELL_DELETE_TOKEN_RE.search(seg):
+                if self._CD_RE.match(seg):
+                    t = self._cd_target(seg)
+                    if t:
+                        cwd_hint = t
+                continue
+            if not kw_outside and not has_interpreter:
+                continue
+            toks = self._shell_tokens(seg)
+            paths = [t for t in toks
+                     if self._looks_like_path(t)
+                     and not self._is_null_device(t)
+                     and not self._is_null_device(re.sub(r'^\d*>+', '', t))]
+            if self._DELETE_CMD_START_RE.match(seg):
+                paths.extend(t for t in toks
+                             if t not in paths
+                             and not self._SHELL_FLAG_RE.fullmatch(t)
+                             and not self._SHELL_SYMBOL_RE.fullmatch(t)
+                             and t.lower() not in self._DELETE_KEYWORDS
+                             and not self._is_null_device(t)
+                             and not self._is_null_device(re.sub(r'^\d*>+', '', t)))
+            if not paths:
+                return ("安全拦截: 删除命令未指定可识别的删除目标。\n"
+                        f"命令: {command}\n"
+                        "删除目标请使用绝对路径（或先 cd 到可删区内再用相对路径）。\n"
+                        + self._deletable_hint())
+            for t in paths:
+                if not self._is_deletable_path(t, cwd_hint):
+                    return (f"安全拦截: 禁止删除可删区之外的路径: {t}\n"
+                            f"命令: {command}\n" + self._deletable_hint())
+        return None
 
     def _check_shell_security(self, command: str) -> Optional[str]:
         """检查 Shell 命令是否包含危险操作"""
         for pattern, msg in self._SHELL_DANGEROUS_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
                 return f"安全拦截: {msg}\n命令: {command}\n如确需执行，请在系统终端中手动运行。"
+
+        # 删除命令：目标必须落在可删区内
+        msg = self._check_shell_delete(command)
+        if msg:
+            return msg
 
         # 重定向 / tee / copy·move 等写入受保护系统目录
         for target in self._iter_shell_write_targets(command):
@@ -1301,10 +1781,9 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
     }
 
     # Python 代码安全黑名单
+    # 注：os.remove/os.rmdir/shutil.rmtree 不走黑名单，由 _check_delete_code 校验删除目标是否在可删区内
     _DANGEROUS_PATTERNS = [
-        (r'\bos\.remove\b', "禁止使用 os.remove 删除文件"),
-        (r'\bos\.rmdir\b', "禁止使用 os.rmdir 删除目录"),
-        (r'\bshutil\.rmtree\b', "禁止使用 shutil.rmtree 递归删除"),
+        (r'\bos\.removedirs\b', "禁止使用 os.removedirs（会向上逐级删除父目录，无法限定范围）；删除目录请改用 shutil.rmtree，且目标在可删区内"),
         (r'\bos\.system\b', "禁止使用 os.system 执行系统命令"),
         (r'\bsubprocess\b', "禁止使用 subprocess 执行外部进程"),
         (r'\b__import__\b', "禁止使用 __import__ 动态导入"),
@@ -1338,6 +1817,12 @@ class HoudiniMCP(NetworkInspectMixin, NodeOpsMixin, ParamOpsMixin, ExecOpsMixin,
         for pattern, msg in self._DANGEROUS_PATTERNS:
             if re.search(pattern, code):
                 return f"⛔ 安全拦截: {msg}\n如确需执行，请在 Houdini Python Shell 中手动运行。"
+
+        # 删除文件/目录：只允许删除可删区内的路径
+        if self._FUNC_DELETE_RE.search(code) or self._METHOD_DELETE_RE.search(code):
+            msg = self._check_delete_code(code)
+            if msg:
+                return msg
 
         # 写文件本身允许，但不得写入受保护的系统目录
         # 1) open("路径字面量", 写模式)：写入目标明确，直接校验

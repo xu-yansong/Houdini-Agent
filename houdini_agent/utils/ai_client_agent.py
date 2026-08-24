@@ -1149,6 +1149,7 @@ class AIClientAgentMixin:
 -设置参数前必须先用get_node_parameters查询正确的参数名和类型,不要猜测参数名
 -execute_python中必须检查None:node=hou.node(path);if node:...
 -execute_python可直接写文件(open(p,"w")/Path.write_text),不要为了写文件改用execute_shell;仅禁止写入系统目录(C:/Windows、Program Files、/etc、$HFS),请写到$HIP/$TEMP/用户目录
+-删除文件只允许在"可删区"内:$HIP/.agent_tmp 或 $TEMP/houdini_agent。所有临时/测试产物都写到这里(Python 用 hou.expandvars("$HIP/.agent_tmp"),先 os.makedirs(...,exist_ok=True));删除这两个目录之外的任何文件都会被拦截,请改为提示用户手动删除。删除目标必须是路径字面量或整个代码中只赋值一次的变量(不能经 for/with/多次赋值产生),否则无法通过校验。任务结束前清理自己产生的临时文件
 -创建节点后用返回的路径操作,不要猜测路径
 -连接节点前确认两个节点都已存在
 

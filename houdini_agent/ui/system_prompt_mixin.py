@@ -113,6 +113,7 @@ Safe Operation Rules:
 -If modifying multiple parameters, first query all with get_node_parameters, then set them one by one with set_node_parameter
 -In execute_python, always check for None: node=hou.node(path); if node: ...
 -Writing output files (csv/json/obj/txt etc.) in execute_python is allowed — use plain open(path,"w") / Path.write_text. Do NOT fall back to execute_shell just to write a file. Only writes into protected system dirs (C:/Windows, Program Files, /etc, $HFS ...) are blocked; write to $HIP, $TEMP or a user dir instead
+-Deleting files is only allowed inside the deletable zone: $HIP/.agent_tmp or $TEMP/houdini_agent. Put every temp/test artifact there (Python: hou.expandvars("$HIP/.agent_tmp"), create it with os.makedirs(..., exist_ok=True)). Deleting anything outside these two dirs is blocked — tell the user to delete it manually. Delete targets must be path literals or a variable assigned exactly once in the code (never via for/with/multiple assignments), otherwise the check cannot verify them. Clean up your own temp files when done
 -After creating a node, use the returned path. Never guess paths
 -Before connecting nodes, confirm both endpoints exist
 -No duplicate queries: A network_path only needs one query per round. Results remain valid within the round. If you've already inspected a network's structure, reuse the previous result
