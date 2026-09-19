@@ -322,7 +322,7 @@ class AIClientContextMixin:
     # 已自带分页的工具，不再二次截断
     _SELF_PAGED_TOOLS = frozenset({
         'get_houdini_node_doc', 'get_network_structure', 'get_node_parameters',
-        'list_children', 'execute_python', 'execute_shell',
+        'list_children', 'execute_python', 'execute_shell', 'list_skills',
     })
 
     def _compress_tool_result(self, tool_name: str, result: dict) -> str:
