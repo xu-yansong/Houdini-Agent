@@ -31,6 +31,9 @@ trainData/
 # Temp/backup files
 *_backup.py
 *_new.py
+*.bak
+*.bak_*
+*.orig
 
 # Legacy directory (renamed to houdini_agent)
 HOUDINI_HIP_MANAGER/
